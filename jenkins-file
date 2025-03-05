@@ -1,0 +1,102 @@
+pipeline {
+    agent any
+    
+    tools {
+        maven 'maven3'
+    }
+    
+    environment {
+        SCANNER_HOME = tool 'sonar-scanner'
+    }
+    
+    parameters {
+        string(name: 'DOCKER_TAG', defaultValue: 'latest', description: 'Tag for the Docker image')
+    }
+
+    stages {
+        stage('Git checkout') {
+            steps {
+                git branch: 'main', credentialsId: 'github', url: 'https://github.com/chaitanya1330/Multi-Tier-BankApp-CI.git'
+            }
+        }
+        stage('compile') {
+            steps {
+                sh 'mvn compile'
+            }
+        }
+        stage('testing') {
+            steps {
+                sh 'mvn test -DskipTests=true'
+            }
+        }
+        stage('trivy-scan') {
+            steps {
+                sh "trivy fs --format table -o fs.html ."
+            }
+        }
+        stage('sonar-analysis') {
+            steps {
+                withSonarQubeEnv('sonar') {
+                    sh ''' $SCANNER_HOME/bin/sonar-scanner -Dsonar.projectName=bankapp -Dsonar.projectKey=bankapp \
+                        -Dsonar.java.binaries=target '''
+                }
+            }
+        }
+        stage('deploy') {
+            steps {
+                withMaven(globalMavenSettingsConfig: 'maven-settings-bankapp', jdk: '', maven: 'maven3', mavenSettingsConfig: '', traceability: true) {
+                    sh 'mvn deploy -DskipTests=true'
+                }
+            }
+        }
+        stage('build and tag') {
+            steps {
+                script{
+                    withDockerRegistry(credentialsId: 'docker-hub') {
+                        sh "docker build -t chaitanyachay/bankapp:${params.DOCKER_TAG} ."
+                    }
+                }
+            }
+        }
+        stage('image scan') {
+            steps {
+                sh " trivy image --format table -o dimage.html chaitanyachay/bankapp:${params.DOCKER_TAG}"
+            }
+        }
+        stage('docker push') {
+            steps {
+                script{
+                    withDockerRegistry(credentialsId: 'docker-hub') {
+                        sh "docker push chaitanyachay/bankapp:${params.DOCKER_TAG}"
+                    }
+                }
+            }
+        }
+        stage('update manifests') {
+            steps {
+                script {
+                    withCredentials([gitUsernamePassword(credentialsId: 'github', gitToolName: 'Default')]) {
+                        sh """
+                            # Clone the repo only if it does not exist
+                            if [ ! -d "Multi-Tier-BankApp-CD" ]; then
+                                git clone -b main https://github.com/chaitanya1330/Multi-Tier-BankApp-CD.git
+                            fi
+                            cd Multi-Tier-BankApp-CD
+                            ls -l bankapp
+                            sed -i 's|image: chaitanyachay/bankapp:[^ ]*|image: chaitanyachay/bankapp:${params.DOCKER_TAG}|' bankapp/bankapp-ds.yml
+                            echo "Updated YAML file contents:"
+                            cat bankapp/bankapp-ds.yml  # ✅ Corrected file path
+                            git config user.name "Jenkins"
+                            git config user.email "vantaku.chaitanya@netscribes.com"
+                            git add bankapp/bankapp-ds.yml
+                            git commit -m "Update bankapp image to tag ${params.DOCKER_TAG}"
+                            git push https://github.com/chaitanya1330/Multi-Tier-BankApp-CD.git main
+                        """
+                    }
+                }
+            }
+        }
+
+  
+    }
+}
